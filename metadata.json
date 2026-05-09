@@ -1,0 +1,5 @@
+{
+  "name": "Maro BOT",
+  "description": "A complete, fully functional WhatsApp bot with a real pairing system, admin commands, anti-link protection, and a lightweight web control panel.",
+  "requestFramePermissions": []
+}
