@@ -1125,7 +1125,32 @@ async function initServer() {
 
     addLog(`Initializing server in ${process.env.NODE_ENV || 'development'} mode`);
 
-    // Start listening ASAP
+    if (process.env.NODE_ENV !== 'production') {
+        try {
+            const vite = await createViteServer({
+                server: { middlewareMode: true },
+                appType: 'spa',
+            });
+            app.use(vite.middlewares);
+            addLog('Vite middleware attached');
+        } catch (err) {
+            console.error('Vite initialization error:', err);
+            addLog(`Vite Error: ${err}`);
+        }
+    } else {
+        const distPath = path.join(process.cwd(), 'dist');
+        if (fs.existsSync(distPath)) {
+            app.use(express.static(distPath));
+            app.get('*', (req, res) => {
+                res.sendFile(path.join(distPath, 'index.html'));
+            });
+            addLog('Static middleware attached');
+        } else {
+            addLog('Warning: dist folder not found in production mode');
+        }
+    }
+
+    // Start listening
     server.listen(PORT, '0.0.0.0', async () => {
         addLog(`Server running on http://localhost:${PORT}`);
         
@@ -1148,26 +1173,6 @@ async function initServer() {
             addLog(`[Firebase] Auth Error: ${error.message}. Make sure Anonymous Auth is enabled in Firebase Console.`);
         });
     });
-    
-    if (process.env.NODE_ENV !== 'production') {
-        try {
-            const vite = await createViteServer({
-                server: { middlewareMode: true },
-                appType: 'spa',
-            });
-            app.use(vite.middlewares);
-        } catch (err) {
-            console.error('Vite initialization error:', err);
-        }
-    } else {
-        const distPath = path.join(process.cwd(), 'dist');
-        if (fs.existsSync(distPath)) {
-            app.use(express.static(distPath));
-            app.get('*', (req, res) => {
-                res.sendFile(path.join(distPath, 'index.html'));
-            });
-        }
-    }
 
     // Socket.io events
     io.on('connection', async (socket) => {
@@ -1272,5 +1277,15 @@ async function initServer() {
         });
     });
 }
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    addLog(`[System] Unhandled Rejection: ${reason}`);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+    addLog(`[System] Uncaught Exception: ${err.message}`);
+});
 
 initServer();
