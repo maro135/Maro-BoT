@@ -1,0 +1,48 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User statistics and status",
+      "type": "object",
+      "properties": {
+        "points": { "type": "integer", "description": "User reward points" },
+        "warnings": { "type": "integer", "description": "Anti-link warning count" },
+        "banned": { "type": "boolean", "description": "User ban status" }
+      },
+      "required": ["points", "warnings", "banned"]
+    },
+    "Group": {
+      "title": "Group",
+      "description": "Group settings",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Anti-link system status" }
+      },
+      "required": ["enabled"]
+    },
+    "Setting": {
+      "title": "Setting",
+      "description": "Global bot settings",
+      "type": "object",
+      "properties": {
+        "ownerNumber": { "type": "string", "description": "Primary owner number" },
+        "botNumber": { "type": "string", "description": "Current bot phone number" }
+      },
+      "required": ["ownerNumber"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Individual user data records"
+    },
+    "/groups/{groupId}": {
+      "schema": "Group",
+      "description": "Group configuration"
+    },
+    "/settings/global": {
+      "schema": "Setting",
+      "description": "Global configuration document"
+    }
+  }
+}

@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Helper for User validation
+    function isValidUser(data) {
+      return data.keys().hasAll(['points', 'warnings', 'banned']) 
+             && data.keys().size() == 3
+             && data.points is int && data.points >= 0
+             && data.warnings is int && data.warnings >= 0
+             && data.banned is bool;
+    }
+
+    // Helper for Group validation
+    function isValidGroup(data) {
+      return data.keys().hasAll(['enabled'])
+             && data.keys().size() == 1
+             && data.enabled is bool;
+    }
+
+    // Helper for Setting validation
+    function isValidSetting(data) {
+      return data.keys().hasAny(['ownerNumber'])
+             && data.ownerNumber is string && data.ownerNumber.size() <= 20;
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidUser(request.resource.data) && isValidId(userId);
+      allow delete: if isAdmin();
+    }
+
+    // 2. Groups Collection
+    match /groups/{groupId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidGroup(request.resource.data) && isValidId(groupId);
+      allow delete: if isAdmin();
+    }
+
+    // 3. Settings Collection
+    match /settings/global {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidSetting(request.resource.data);
+    }
+
+    // 4. Logs Collection
+    match /logs/{logId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+    }
+
+    // 5. Admins Collection
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+  }
+}

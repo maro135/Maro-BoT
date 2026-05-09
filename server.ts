@@ -1,5 +1,4 @@
 import express from 'express';
-console.log('--- SERVER STARTING ---');
 import { createServer as createViteServer } from 'vite';
 import { Server } from 'socket.io';
 import http from 'http';
@@ -13,8 +12,24 @@ import makeWASocket, {
     Browsers,
     downloadContentFromMessage
 } from '@whiskeysockets/baileys';
+import { 
+    doc, 
+    getDoc, 
+    setDoc, 
+    updateDoc, 
+    collection, 
+    getDocs, 
+    query, 
+    where, 
+    orderBy, 
+    limit, 
+    onSnapshot,
+    serverTimestamp,
+    increment,
+    writeBatch
+} from 'firebase/firestore';
+import { db as firestore, auth as firebaseAuth, OperationType, handleFirestoreError } from './src/lib/firebase.ts';
 import pino from 'pino';
-import { JSONFilePreset } from 'lowdb/node';
 import fs from 'fs';
 import sharp from 'sharp';
 import gTTS from 'gtts';
@@ -24,22 +39,78 @@ import { duaas } from './duaas.ts';
 import { wisdoms } from './wisdoms.ts';
 import { lovePosts } from './lovePosts.ts';
 import { jokes } from './jokes.ts';
+import { signInAnonymously } from 'firebase/auth';
 
+// Sign in anonymously for Firestore access moved to initServer to prevent blocking server start
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Database setup
-const defaultData = { 
-    users: {} as Record<string, { points: number, warnings: number, banned: boolean }>,
-    groups: {} as Record<string, { enabled: boolean }>,
-    logs: [] as string[],
-    settings: { ownerNumber: process.env.OWNER_NUMBER || '201094534865' }
-};
-const db = await JSONFilePreset('db.json', defaultData);
+// Firebase Helper Functions
+async function getSettings() {
+    try {
+        const settingsDoc = await getDoc(doc(firestore, 'settings', 'global'));
+        if (settingsDoc.exists()) {
+            return settingsDoc.data();
+        }
+        const defaultSettings = { ownerNumber: process.env.OWNER_NUMBER || '201094534865', botNumber: '' };
+        await setDoc(doc(firestore, 'settings', 'global'), defaultSettings);
+        return defaultSettings;
+    } catch (error) {
+        handleFirestoreError(error, OperationType.GET, 'settings/global');
+    }
+}
 
-if (!db.data.settings) {
-    db.data.settings = { ownerNumber: process.env.OWNER_NUMBER || '201094534865' };
-    await db.write();
+async function getUser(userId: string) {
+    try {
+        const userDoc = await getDoc(doc(firestore, 'users', userId));
+        if (userDoc.exists()) {
+            return userDoc.data();
+        }
+        const newUser = { points: 0, warnings: 0, banned: false };
+        await setDoc(doc(firestore, 'users', userId), newUser);
+        return newUser;
+    } catch (error) {
+        handleFirestoreError(error, OperationType.GET, `users/${userId}`);
+    }
+}
+
+async function updateUserData(userId: string, data: any) {
+    try {
+        await updateDoc(doc(firestore, 'users', userId), data);
+    } catch (error) {
+        // If doc doesn't exist, try setting it
+        if (error instanceof Error && error.message.includes('not-found')) {
+            await setDoc(doc(firestore, 'users', userId), data, { merge: true });
+        } else {
+            handleFirestoreError(error, OperationType.UPDATE, `users/${userId}`);
+        }
+    }
+}
+
+async function getGroup(groupId: string) {
+    try {
+        const groupDoc = await getDoc(doc(firestore, 'groups', groupId));
+        if (groupDoc.exists()) {
+            return groupDoc.data();
+        }
+        const newGroup = { enabled: false };
+        await setDoc(doc(firestore, 'groups', groupId), newGroup);
+        return newGroup;
+    } catch (error) {
+        handleFirestoreError(error, OperationType.GET, `groups/${groupId}`);
+    }
+}
+
+async function updateGroupData(groupId: string, data: any) {
+    try {
+        await updateDoc(doc(firestore, 'groups', groupId), data);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('not-found')) {
+            await setDoc(doc(firestore, 'groups', groupId), data, { merge: true });
+        } else {
+            handleFirestoreError(error, OperationType.UPDATE, `groups/${groupId}`);
+        }
+    }
 }
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
@@ -47,6 +118,8 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 const PORT = 3000;
 const app = express();
 const server = http.createServer(app);
+
+app.get('/health', (req, res) => res.send('OK'));
 
 let io: Server;
 
@@ -103,13 +176,16 @@ ${b[6]} | ${b[7]} | ${b[8]}
     await sock.sendMessage(from, { text, mentions: uniqueMentions });
 }
 
-function addLog(message: string) {
+async function addLog(message: string) {
     const log = `[${new Date().toLocaleTimeString()}] ${message}`;
     console.log(log);
-    if (db.data) {
-        db.data.logs.push(log);
-        if (db.data.logs.length > 100) db.data.logs.shift();
-        db.write().catch(err => console.error('DB Write Error:', err));
+    try {
+        await setDoc(doc(firestore, 'logs', `${Date.now()}`), { 
+            message: log, 
+            timestamp: serverTimestamp() 
+        });
+    } catch (err) {
+        console.error('Firebase Log Error:', err);
     }
     if (io) io.emit('log', log);
 }
@@ -134,13 +210,25 @@ async function sendStats() {
         console.error('Error reading sessions:', err);
     }
 
-    const stats = {
-        groups: Object.keys(db.data.groups).length,
-        users: Object.keys(db.data.users).length,
-        activeBots: activeBots
-    };
-    io.emit('stats', stats);
-    io.emit('bannedUsers', db.data.users);
+    try {
+        const usersSnap = await getDocs(collection(firestore, 'users'));
+        const groupsSnap = await getDocs(collection(firestore, 'groups'));
+        
+        const stats = {
+            groups: groupsSnap.size,
+            users: usersSnap.size,
+            activeBots: activeBots
+        };
+        io.emit('stats', stats);
+        
+        const users: any = {};
+        usersSnap.forEach(docSnap => {
+            users[docSnap.id] = docSnap.data();
+        });
+        io.emit('bannedUsers', users);
+    } catch (err) {
+        console.error('Firebase Stats Error:', err);
+    }
 }
 
 async function handleInstallation(phoneNumber: string, from: string, sender: string) {
@@ -412,7 +500,8 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
             const command = body.trim().split(/ +/)[0].toLowerCase();
             
             const botNumber = sock.user?.id?.split(':')[0];
-            const currentOwner = db.data.settings?.ownerNumber || OWNER_NUMBER;
+            const settings = await getSettings() as any;
+            const currentOwner = settings.ownerNumber || OWNER_NUMBER;
             
             // If the message is from the bot's own phone (fromMe), the sender is effectively the owner/bot.
             const isOwner = msg.key.fromMe || sender.includes(currentOwner) || (botNumber && sender.includes(botNumber));
@@ -423,12 +512,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
             }
 
             // Initialize user in DB
-            if (!db.data.users[sender]) {
-                db.data.users[sender] = { points: 0, warnings: 0, banned: false };
-                await db.write();
-            }
-
-            const userData = db.data.users[sender];
+            const userData = await getUser(sender) as any;
 
             // Handle Question Answers
             if (questionState[from] && !body.startsWith('.')) {
@@ -437,7 +521,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                     if (body.trim().toLowerCase() === state.answer.toLowerCase()) {
                         delete questionState[from];
                         userData.points += 10;
-                        await db.write();
+                        await updateUserData(sender, { points: increment(10) });
                         await sock.sendMessage(from, { 
                             text: `✅ *إجابة صحيحة يا ${pushName}!*\n\nلقد حصلت على 10 نقاط. رصيدك الحالي هو: ${userData.points} نقطة. ✨`,
                             reply: msg
@@ -479,8 +563,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                         const winnerId = winner === 'X' ? game.playerX : game.playerO;
                         const loserId = winner === 'X' ? game.playerO : game.playerX;
                         
-                        db.data.users[winnerId].points += 50;
-                        await db.write();
+                        await updateUserData(winnerId, { points: increment(50) });
 
                         await sendTTTBoard(from, sock, game, `🎉 *انتهت اللعبة!*\n\nالفائز هو: @${winnerId.split('@')[0]} (حصل على 50 نقطة 💰)\nحظ أوفر لـ @${loserId.split('@')[0]}`, [winnerId, loserId]);
                         delete tttState[from];
@@ -507,7 +590,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
 
             // Anti-link system
             if (isGroup && body.match(/https?:\/\/[^\s]+|wa\.me\/[^\s]+/gi)) {
-                const groupData = db.data.groups[from];
+                const groupData = await getGroup(from) as any;
                 if (groupData?.enabled) {
                     const groupMetadata = await sock.groupMetadata(from);
                     const isAdmin = groupMetadata.participants.find((p: any) => p.id === sender)?.admin || isOwner;
@@ -515,13 +598,13 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                     if (!isAdmin) {
                         await sock.sendMessage(from, { delete: msg.key });
                         userData.warnings++;
-                        await db.write();
+                        await updateUserData(sender, { warnings: increment(1) });
                         
                         if (userData.warnings >= 3) {
                             await sock.sendMessage(from, { text: `تم طرد @${sender.split('@')[0]} بسبب إرسال الروابط المتكرر.`, mentions: [sender] });
                             await sock.groupParticipantsUpdate(from, [sender], 'remove');
                             userData.warnings = 0;
-                            await db.write();
+                            await updateUserData(sender, { warnings: 0 });
                         } else {
                             await sock.sendMessage(from, { text: `⚠️ تحذير @${sender.split('@')[0]}: الروابط ممنوعة! لديك ${userData.warnings}/3 تحذيرات.`, mentions: [sender] });
                         }
@@ -962,10 +1045,9 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                 const isAdminAnti = groupMetaAnti.participants.find((p: any) => p.id === sender)?.admin || isOwner;
                 
                 if (isAdminAnti) {
-                    if (!db.data.groups[from]) db.data.groups[from] = { enabled: false };
-                    const newState = !db.data.groups[from].enabled;
-                    db.data.groups[from].enabled = newState;
-                    await db.write();
+                    const groupData = await getGroup(from) as any;
+                    const newState = !groupData.enabled;
+                    await updateGroupData(from, { enabled: newState });
                     await sock.sendMessage(from, { 
                         text: `🛡️ *نظام مكافحة الروابط:*\n\nتم ${newState ? 'تفعيل ✅' : 'تعطيل ❌'} النظام في هذه المجموعة.` 
                     });
@@ -977,9 +1059,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                 if (await checkOwner()) {
                     const target = args[0]?.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (target && args[0]) {
-                        if (!db.data.users[target]) db.data.users[target] = { points: 0, warnings: 0, banned: true };
-                        db.data.users[target].banned = true;
-                        await db.write();
+                        await updateUserData(target, { banned: true });
                         await sock.sendMessage(from, { text: `✅ تم حظر المستخدم ${args[0]}` });
                     } else {
                         await sendUsage(from, msg, '.حظر [رقم المستخدم]', 'لحظر مستخدم من استخدام البوت');
@@ -991,11 +1071,8 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                 if (await checkOwner()) {
                     const target = args[0]?.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     if (target && args[0]) {
-                        if (db.data.users[target]) {
-                            db.data.users[target].banned = false;
-                            await db.write();
-                            await sock.sendMessage(from, { text: `✅ تم فك حظر المستخدم ${args[0]}` });
-                        }
+                        await updateUserData(target, { banned: false });
+                        await sock.sendMessage(from, { text: `✅ تم فك حظر المستخدم ${args[0]}` });
                     } else {
                         await sendUsage(from, msg, '.فك_حظر [رقم المستخدم]', 'لإلغاء حظر مستخدم');
                     }
@@ -1005,8 +1082,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
             case '.تفعيل':
                 if (await checkOwner()) {
                     if (isGroup) {
-                        db.data.groups[from] = { enabled: true };
-                        await db.write();
+                        await updateGroupData(from, { enabled: true });
                         await sock.sendMessage(from, { text: '✅ تم تفعيل حماية البوت في هذه المجموعة' });
                     } else {
                         await sendUsage(from, msg, '.تفعيل', 'يجب استخدام هذا الأمر داخل مجموعة');
@@ -1017,8 +1093,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
             case '.تعطيل':
                 if (await checkOwner()) {
                     if (isGroup) {
-                        db.data.groups[from] = { enabled: false };
-                        await db.write();
+                        await updateGroupData(from, { enabled: false });
                         await sock.sendMessage(from, { text: '❌ تم تعطيل حماية البوت في هذه المجموعة' });
                     } else {
                         await sendUsage(from, msg, '.تعطيل', 'يجب استخدام هذا الأمر داخل مجموعة');
@@ -1028,8 +1103,7 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
         }
 
         // Add points for every message
-        userData.points += 1;
-        await db.write();
+        await updateUserData(sender, { points: increment(1) });
         sendStats();
     } catch (err) {
         addLog(`[Error] messages.upsert: ${err}`);
@@ -1050,42 +1124,77 @@ async function initServer() {
     io = new Server(server);
 
     addLog(`Initializing server in ${process.env.NODE_ENV || 'development'} mode`);
-    
-    if (process.env.NODE_ENV !== 'production') {
-        const vite = await createViteServer({
-            server: { middlewareMode: true },
-            appType: 'spa',
-        });
-        app.use(vite.middlewares);
-    } else {
-        const distPath = path.join(process.cwd(), 'dist');
-        app.use(express.static(distPath));
-        app.get('*', (req, res) => {
-            res.sendFile(path.join(distPath, 'index.html'));
-        });
-    }
 
-    server.listen(PORT, '0.0.0.0', () => {
+    // Start listening ASAP
+    server.listen(PORT, '0.0.0.0', async () => {
         addLog(`Server running on http://localhost:${PORT}`);
         
-        // Auto-start if a bot number is saved and its session exists
-        const savedBotNumber = db.data.settings?.botNumber;
-        if (savedBotNumber) {
-            const sessionFolder = `session_${savedBotNumber}`;
-            if (fs.existsSync(path.join(sessionFolder, 'creds.json'))) {
-                addLog(`[System] Found existing session for ${savedBotNumber}, auto-starting...`);
-                startBot(savedBotNumber, false);
-            }
-        }
+        // Sign in anonymously for Firestore access (Non-blocking)
+        signInAnonymously(firebaseAuth).then(() => {
+            console.log('Firebase: Signed in anonymously');
+            // Auto-start if a bot number is saved and its session exists
+            getSettings().then((settings: any) => {
+                const savedBotNumber = settings?.botNumber;
+                if (savedBotNumber) {
+                    const sessionFolder = `session_${savedBotNumber}`;
+                    if (fs.existsSync(path.join(sessionFolder, 'creds.json'))) {
+                        addLog(`[System] Found existing session for ${savedBotNumber}, auto-starting...`);
+                        startBot(savedBotNumber, false);
+                    }
+                }
+            }).catch(err => console.error('Firebase Settings Error:', err));
+        }).catch(error => {
+            console.error('Firebase Auth Error:', error);
+            addLog(`[Firebase] Auth Error: ${error.message}. Make sure Anonymous Auth is enabled in Firebase Console.`);
+        });
     });
+    
+    if (process.env.NODE_ENV !== 'production') {
+        try {
+            const vite = await createViteServer({
+                server: { middlewareMode: true },
+                appType: 'spa',
+            });
+            app.use(vite.middlewares);
+        } catch (err) {
+            console.error('Vite initialization error:', err);
+        }
+    } else {
+        const distPath = path.join(process.cwd(), 'dist');
+        if (fs.existsSync(distPath)) {
+            app.use(express.static(distPath));
+            app.get('*', (req, res) => {
+                res.sendFile(path.join(distPath, 'index.html'));
+            });
+        }
+    }
 
     // Socket.io events
-    io.on('connection', (socket) => {
+    io.on('connection', async (socket) => {
         socket.emit('status', botStatus);
         socket.emit('pairingCode', pairingCode);
-        socket.emit('logs', db.data.logs);
-        socket.emit('ownerNumber', db.data.settings?.ownerNumber || OWNER_NUMBER);
-        socket.emit('botNumber', db.data.settings?.botNumber || '');
+        
+        try {
+            // Fetch recent logs from Firestore
+            const logsSnap = await getDocs(query(collection(firestore, 'logs'), orderBy('timestamp', 'desc'), limit(100)));
+            const logs = logsSnap.docs.map(doc => doc.data().message).reverse();
+            socket.emit('logs', logs);
+        } catch (err) {
+            console.error('Firebase Logs Fetch Error:', err);
+            socket.emit('logs', []);
+        }
+        
+        try {
+            const settings = await getSettings() as any;
+            if (settings) {
+                socket.emit('ownerNumber', settings.ownerNumber || OWNER_NUMBER);
+                socket.emit('botNumber', settings.botNumber || '');
+            }
+        } catch (err) {
+            console.error('Firebase Settings Fetch Error:', err);
+            socket.emit('ownerNumber', OWNER_NUMBER);
+        }
+        
         sendStats();
 
         socket.on('startBot', async (phoneNumber: string) => {
@@ -1096,9 +1205,12 @@ async function initServer() {
             
             // Save the last used bot number for auto-start
             const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-            if (cleanNumber && db.data.settings.botNumber !== cleanNumber) {
-                db.data.settings.botNumber = cleanNumber;
-                await db.write();
+            if (cleanNumber) {
+                try {
+                    await updateDoc(doc(firestore, 'settings', 'global'), { botNumber: cleanNumber });
+                } catch (err) {
+                    console.error('Firebase Save Bot Number Error:', err);
+                }
             }
             
             await startBot(phoneNumber, false); // Do not clear session by default
@@ -1113,8 +1225,11 @@ async function initServer() {
             
             const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
             if (cleanNumber) {
-                db.data.settings.botNumber = cleanNumber;
-                await db.write();
+                try {
+                    await updateDoc(doc(firestore, 'settings', 'global'), { botNumber: cleanNumber });
+                } catch (err) {
+                    console.error('Firebase Force Save Bot Number Error:', err);
+                }
             }
             
             await startBot(phoneNumber, true); // Clear session to force pairing
@@ -1137,21 +1252,22 @@ async function initServer() {
         });
 
         socket.on('unbanUser', async (userId: string) => {
-            if (db.data.users[userId]) {
-                db.data.users[userId].banned = false;
-                await db.write();
-                addLog(`User ${userId} unbanned via panel.`);
-                sendStats();
-            }
+            await updateUserData(userId, { banned: false });
+            addLog(`User ${userId} unbanned via panel.`);
+            sendStats();
         });
 
         socket.on('setOwnerNumber', async (number: string) => {
             const cleanNumber = number.replace(/[^0-9]/g, '');
             if (cleanNumber) {
-                db.data.settings.ownerNumber = cleanNumber;
-                await db.write();
-                addLog(`Owner number updated to: ${cleanNumber}`);
-                io.emit('ownerNumber', cleanNumber);
+                try {
+                    await updateDoc(doc(firestore, 'settings', 'global'), { ownerNumber: cleanNumber });
+                    addLog(`Owner number updated to: ${cleanNumber}`);
+                    io.emit('ownerNumber', cleanNumber);
+                } catch (err) {
+                    console.error('Firebase Set Owner Error:', err);
+                    handleFirestoreError(err, OperationType.UPDATE, 'settings/global');
+                }
             }
         });
     });
