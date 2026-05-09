@@ -1180,8 +1180,13 @@ async function initServer() {
     // Socket.io events - MOVED BEFORE LISTEN
     io.on('connection', async (socket) => {
         console.log('[Socket] New client connected:', socket.id);
+        
+        // Immediate status update
         socket.emit('status', botStatus);
         socket.emit('pairingCode', pairingCode);
+        
+        // Ping/Pong for connection check
+        socket.on('ping', () => socket.emit('pong'));
         
         try {
             // Fetch recent logs from Firestore
@@ -1190,7 +1195,7 @@ async function initServer() {
             socket.emit('logs', logs);
         } catch (err) {
             console.error('Firebase Logs Fetch Error:', err);
-            socket.emit('logs', []);
+            socket.emit('logs', ['[System] Failed to fetch historical logs. Check Firestore rules.']);
         }
         
         try {
@@ -1207,81 +1212,99 @@ async function initServer() {
         sendStats();
 
         socket.on('startBot', async (phoneNumber: string) => {
-            if (botStatus === 'connected') return;
-            
-            stopBotFlag = false;
-            addLog(`Starting bot for number: ${phoneNumber}`);
-            
-            // Save the last used bot number for auto-start
-            const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-            if (cleanNumber) {
-                try {
-                    await updateDoc(doc(firestore, 'settings', 'global'), { botNumber: cleanNumber });
-                } catch (err) {
-                    console.error('Firebase Save Bot Number Error:', err);
+            try {
+                if (botStatus === 'connected') {
+                    socket.emit('log', '[System] Bot is already connected.');
+                    return;
                 }
+                
+                stopBotFlag = false;
+                addLog(`Starting bot for number: ${phoneNumber}`);
+                
+                const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+                if (cleanNumber) {
+                    await setDoc(doc(firestore, 'settings', 'global'), { botNumber: cleanNumber }, { merge: true });
+                }
+                
+                await startBot(phoneNumber, false);
+            } catch (err: any) {
+                console.error('Socket startBot Error:', err);
+                socket.emit('log', `[Error] Failed to start bot: ${err.message}`);
             }
-            
-            await startBot(phoneNumber, false); // Do not clear session by default
         });
 
         socket.on('forcePairing', async (phoneNumber: string) => {
-            if (botStatus === 'connected') {
-                sock?.end();
-            }
-            stopBotFlag = false;
-            addLog(`Forcing new pairing for number: ${phoneNumber}`);
-            
-            const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-            if (cleanNumber) {
-                try {
-                    await updateDoc(doc(firestore, 'settings', 'global'), { botNumber: cleanNumber });
-                } catch (err) {
-                    console.error('Firebase Force Save Bot Number Error:', err);
+            try {
+                if (sock) {
+                    sock.end();
                 }
+                stopBotFlag = false;
+                addLog(`Forcing new pairing for number: ${phoneNumber}`);
+                
+                const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+                if (cleanNumber) {
+                    await setDoc(doc(firestore, 'settings', 'global'), { botNumber: cleanNumber }, { merge: true });
+                }
+                
+                await startBot(phoneNumber, true);
+            } catch (err: any) {
+                console.error('Socket forcePairing Error:', err);
+                socket.emit('log', `[Error] Failed to force pairing: ${err.message}`);
             }
-            
-            await startBot(phoneNumber, true); // Clear session to force pairing
         });
 
         socket.on('stopBot', () => {
-            if (sock) {
-                stopBotFlag = true;
-                sock.end();
-                botStatus = 'disconnected';
-                io.emit('status', botStatus);
-                addLog('Bot stopped manually.');
+            try {
+                if (sock) {
+                    stopBotFlag = true;
+                    sock.end();
+                    botStatus = 'disconnected';
+                    io.emit('status', botStatus);
+                    addLog('Bot stopped manually.');
+                }
+            } catch (err: any) {
+                socket.emit('log', `[Error] Failed to stop bot: ${err.message}`);
             }
         });
 
         socket.on('restartBot', () => {
-            if (sock) sock.end();
-            startBot();
-            addLog('Bot restarting...');
-        });
-
-        socket.on('unbanUser', async (userId: string) => {
-            await updateUserData(userId, { banned: false });
-            addLog(`User ${userId} unbanned via panel.`);
-            sendStats();
-        });
-
-        socket.on('setOwnerNumber', async (number: string) => {
-            const cleanNumber = number.replace(/[^0-9]/g, '');
-            if (cleanNumber) {
-                try {
-                    await updateDoc(doc(firestore, 'settings', 'global'), { ownerNumber: cleanNumber });
-                    addLog(`Owner number updated to: ${cleanNumber}`);
-                    io.emit('ownerNumber', cleanNumber);
-                } catch (err) {
-                    console.error('Firebase Set Owner Error:', err);
-                    handleFirestoreError(err, OperationType.UPDATE, 'settings/global');
+            try {
+                if (sock) {
+                    sock.ev.removeAllListeners();
+                    sock.end();
                 }
+                startBot();
+                addLog('Bot restarting...');
+            } catch (err: any) {
+                socket.emit('log', `[Error] Failed to restart bot: ${err.message}`);
             }
         });
 
-        socket.on('disconnect', () => {
-            console.log('[Socket] Client disconnected:', socket.id);
+        socket.on('unbanUser', async (userId: string) => {
+            try {
+                await updateDoc(doc(firestore, 'users', userId), { banned: false });
+                addLog(`User ${userId} unbanned via panel.`);
+                sendStats();
+            } catch (err: any) {
+                socket.emit('log', `[Error] Failed to unban user: ${err.message}`);
+            }
+        });
+
+        socket.on('setOwnerNumber', async (number: string) => {
+            try {
+                const cleanNumber = number.replace(/[^0-9]/g, '');
+                if (cleanNumber) {
+                    await setDoc(doc(firestore, 'settings', 'global'), { ownerNumber: cleanNumber }, { merge: true });
+                    addLog(`Owner number updated to: ${cleanNumber}`);
+                    io.emit('ownerNumber', cleanNumber);
+                }
+            } catch (err: any) {
+                socket.emit('log', `[Error] Failed to update owner: ${err.message}`);
+            }
+        });
+
+        socket.on('disconnect', (reason) => {
+            console.log(`[Socket] Client disconnected (${reason}):`, socket.id);
         });
     });
 

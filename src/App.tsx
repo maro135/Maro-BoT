@@ -32,14 +32,16 @@ export default function App() {
   const [ownerNumber, setOwnerNumber] = useState('');
   const [bannedUsers, setBannedUsers] = useState<Record<string, any>>({});
   const [stats, setStats] = useState({ groups: 0, users: 0, activeBots: 0 });
+  const [latency, setLatency] = useState<number | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const socket = io({
       transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      timeout: 20000,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      timeout: 30000,
     });
     socketRef.current = socket;
 
@@ -69,7 +71,18 @@ export default function App() {
       if (n) setPhoneNumber(n);
     });
 
+    const pingInterval = setInterval(() => {
+      if (socket.connected) {
+        const start = Date.now();
+        socket.emit('ping');
+        socket.once('pong', () => {
+          setLatency(Date.now() - start);
+        });
+      }
+    }, 5000);
+
     return () => {
+      clearInterval(pingInterval);
       socket.disconnect();
     };
   }, []);
@@ -79,25 +92,35 @@ export default function App() {
   }, [logs]);
 
   const handleStart = () => {
-    if (!phoneNumber) {
-      alert('من فضلك أدخل رقم الهاتف أولاً');
+    if (!phoneNumber || phoneNumber.trim().length < 8) {
+      alert('من فضلك أدخل رقم الهاتف بشكل صحيح (مثال: 201094534865)');
       return;
     }
+    setLogs(prev => [...prev, `[System] Sending start request for ${phoneNumber}...`]);
     socketRef.current?.emit('startBot', phoneNumber.replace(/[^0-9]/g, ''));
   };
 
   const handleForcePairing = () => {
-    if (!phoneNumber) {
-      alert('من فضلك أدخل رقم الهاتف أولاً');
+    if (!phoneNumber || phoneNumber.trim().length < 8) {
+      alert('من فضلك أدخل رقم الهاتف بشكل صحيح أولاً');
       return;
     }
     if (confirm('هل أنت متأكد أنك تريد مسح الجلسة الحالية وإعادة الربط من جديد؟')) {
+      setLogs(prev => [...prev, `[System] Sending force pairing request for ${phoneNumber}...`]);
       socketRef.current?.emit('forcePairing', phoneNumber.replace(/[^0-9]/g, ''));
     }
   };
 
-  const handleStop = () => socketRef.current?.emit('stopBot');
-  const handleRestart = () => socketRef.current?.emit('restartBot');
+  const handleStop = () => {
+    setLogs(prev => [...prev, `[System] Sending stop request...`]);
+    socketRef.current?.emit('stopBot');
+  };
+  
+  const handleRestart = () => {
+    setLogs(prev => [...prev, `[System] Sending restart request...`]);
+    socketRef.current?.emit('restartBot');
+  };
+  
   const handleUnban = (userId: string) => socketRef.current?.emit('unbanUser', userId);
 
   return (
@@ -111,7 +134,12 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold tracking-tight text-green-400">Maro BOT</h1>
-              <p className="text-xs text-green-700 font-medium">لوحة التحكم الذكية</p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-green-700 font-medium">لوحة التحكم الذكية</p>
+                {latency !== null && (
+                  <span className="text-[10px] text-green-900">| Latency: {latency}ms</span>
+                )}
+              </div>
             </div>
           </div>
           

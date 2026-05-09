@@ -48,7 +48,7 @@ service cloud.firestore {
 
     // Phase 4: Match Blocks
     match /{document=**} {
-      allow read, write: if isSignedIn();
+      allow read, write: if true;
     }
   }
 }
