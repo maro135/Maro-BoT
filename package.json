@@ -12,11 +12,13 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@types/fluent-ffmpeg": "^2.1.28",
     "@vitejs/plugin-react": "^5.0.4",
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "@whiskeysockets/baileys": "^7.0.0-rc10",
     "clsx": "^2.1.1",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",

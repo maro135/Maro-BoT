@@ -38,16 +38,21 @@ export default function App() {
 
   useEffect(() => {
     const socket = io({
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 10,
+      transports: ['polling', 'websocket'],
+      reconnectionAttempts: 15,
       reconnectionDelay: 1000,
-      timeout: 30000,
+      timeout: 60000,
     });
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('Socket.io: Connected');
+      console.log('Socket.io: Connected via', socket.io.engine.transport.name);
       setStatus('connected');
+      
+      // Update transport type visually if needed
+      socket.io.engine.on('upgrade', () => {
+        console.log('Socket.io: Upgraded to', socket.io.engine.transport.name);
+      });
     });
 
     socket.on('connect_error', (err) => {
@@ -90,6 +95,21 @@ export default function App() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
+
+  const formatPairingCode = (code: string | null) => {
+    if (!code) return null;
+    const clean = code.replace(/-/g, '').toUpperCase();
+    if (clean.length === 8) return `${clean.slice(0, 4)}-${clean.slice(4)}`;
+    return clean;
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      alert('تم نسخ الكود بنجاح!');
+    }).catch(err => {
+      console.error('Failed to copy: ', err);
+    });
+  };
 
   const handleStart = () => {
     if (!phoneNumber || phoneNumber.trim().length < 8) {
@@ -253,12 +273,26 @@ export default function App() {
               )}
 
               {pairingCode && (
-                <div className="mt-6 p-4 bg-green-950 rounded-2xl border border-green-900 text-center animate-pulse">
-                  <p className="text-xs font-bold text-green-500 uppercase tracking-widest mb-2">كود الربط</p>
-                  <div className="text-3xl font-mono font-black text-green-400 tracking-widest">
-                    {pairingCode}
+                <div className="mt-6 p-6 bg-green-950/40 rounded-2xl border border-green-500/50 text-center animate-pulse shadow-[0_0_20px_rgba(34,197,94,0.2)]">
+                  <p className="text-[10px] font-black text-green-500 uppercase tracking-[0.3em] mb-3">كود الربط الرسمي</p>
+                  <div 
+                    className="text-4xl font-mono font-black text-white tracking-widest bg-black/60 py-3 rounded-lg border border-green-900 mb-4 cursor-pointer hover:bg-slate-900 transition-colors"
+                    onClick={() => copyToClipboard(pairingCode)}
+                    title="اضغط للنسخ"
+                  >
+                    {formatPairingCode(pairingCode)}
                   </div>
-                  <p className="text-[10px] text-green-700 mt-2">استخدم هذا الكود في "الأجهزة المرتبطة" داخل واتساب</p>
+                  <div className="space-y-2 text-right">
+                    <div className="text-[10px] text-green-400 flex items-center justify-end gap-2">
+                       افتح هاتفك &gt; الأجهز المرتبطة <div className="w-1 h-1 bg-green-500 rounded-full"/>
+                    </div>
+                    <div className="text-[10px] text-green-400 flex items-center justify-end gap-2">
+                      اختر ربط جهاز &gt; الربط برقم الهاتف <div className="w-1 h-1 bg-green-500 rounded-full"/>
+                    </div>
+                    <div className="text-[10px] text-green-400 flex items-center justify-end gap-2">
+                      أدخل الكود الظاهر أعلاه في هاتفك <div className="w-1 h-1 bg-green-500 rounded-full"/>
+                    </div>
+                  </div>
                 </div>
               )}
             </section>

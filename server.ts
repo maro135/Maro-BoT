@@ -28,17 +28,17 @@ import {
     increment,
     writeBatch
 } from 'firebase/firestore';
-import { db as firestore, auth as firebaseAuth, OperationType, handleFirestoreError, ensureAuth, isAuthReady } from './src/lib/firebase.ts';
+import { db as firestore, auth as firebaseAuth, OperationType, handleFirestoreError, ensureAuth, isAuthReady } from './src/lib/firebase';
 import pino from 'pino';
 import fs from 'fs';
 import sharp from 'sharp';
 import gTTS from 'gtts';
 import { GoogleGenAI } from "@google/genai";
-import { questions } from './questions.ts';
-import { duaas } from './duaas.ts';
-import { wisdoms } from './wisdoms.ts';
-import { lovePosts } from './lovePosts.ts';
-import { jokes } from './jokes.ts';
+import { questions } from './questions';
+import { duaas } from './duaas';
+import { wisdoms } from './wisdoms';
+import { lovePosts } from './lovePosts';
+import { jokes } from './jokes';
 import { signInAnonymously } from 'firebase/auth';
 
 // Sign in anonymously for Firestore access moved to initServer to prevent blocking server start
@@ -256,17 +256,20 @@ async function handleInstallation(phoneNumber: string, from: string, sender: str
         const { state, saveCreds } = await useMultiFileAuthState(tempDir);
         const { version } = await fetchLatestBaileysVersion();
         
-        // Create a real socket just like the main bot
-        const tempSock = makeWASocket({
-            version,
-            auth: {
-                creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
-            },
-            browser: Browsers.ubuntu('Chrome'),
-            logger: pino({ level: 'silent' }),
-            printQRInTerminal: false,
-        });
+            // Create a real socket just like the main bot
+            const tempSock = makeWASocket({
+                version,
+                auth: {
+                    creds: state.creds,
+                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+                },
+                browser: ["Ubuntu", "Chrome", "20.0.04"],
+                logger: pino({ level: 'silent' }),
+                printQRInTerminal: false,
+                connectTimeoutMs: 60000,
+                defaultQueryTimeoutMs: 60000,
+                keepAliveIntervalMs: 30000,
+            });
 
         tempSock.ev.on('creds.update', saveCreds);
         
@@ -284,8 +287,7 @@ async function handleInstallation(phoneNumber: string, from: string, sender: str
             if (connection === 'close') {
                 const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
                 if (shouldReconnect) {
-                    addLog(`[Sub-Bot] Reconnecting sub-bot ${cleanNumber}...`);
-                    // Logic to restart sub-bot could be added here
+                    // Reconnection logic for sub-bots can be added here if needed
                 }
             }
         });
@@ -293,28 +295,31 @@ async function handleInstallation(phoneNumber: string, from: string, sender: str
         // Robust Pairing Code Request with retries
         const requestPairing = async (retries = 5) => {
             try {
-                addLog(`[Sub-Bot] Requesting code for ${cleanNumber} (Attempt ${6 - retries}/5)`);
-                // Wait for socket to be fully initialized
-                await new Promise(resolve => setTimeout(resolve, 10000));
+                if (tempSock.authState.creds.registered) return;
+                
+                addLog(`[Sub-Bot] Requesting official code for ${cleanNumber} (Attempt ${6 - retries}/5)`);
+                // Wait for socket to be fully initialized and connected
+                await new Promise(resolve => setTimeout(resolve, 15000));
                 
                 const code = await tempSock.requestPairingCode(cleanNumber);
                 if (code) {
+                    const formattedCode = code.toUpperCase();
                     await sock.sendMessage(from, { 
-                        text: `✅ *كود الربط الحقيقي الخاص بك هو:*\n\n` +
-                              `*${code}*\n\n` +
+                        text: `✅ *كود ربط واتساب ويب الرسمي الخاص بك:* \n\n` +
+                              `*${formattedCode}*\n\n` +
                               `قم بإدخال هذا الكود في واتساب (الأجهزة المرتبطة > ربط جهاز > الربط برقم الهاتف).\n\n` +
-                              `⚠️ الكود صالح لمدة دقيقتين فقط.`,
+                              `⚠️ تأكد أن الكود يتكون من 8 أحرف وأرقام.`,
                         ...channelContext
                     });
-                    addLog(`[Sub-Bot] ✅ Code ${code} sent to user for ${cleanNumber}`);
+                    addLog(`[Sub-Bot] ✅ Official Code ${formattedCode} sent to user for ${cleanNumber}`);
                 }
             } catch (err: any) {
                 addLog(`[Sub-Bot] ⚠️ Request failed: ${err.message}`);
                 if (retries > 0) {
-                    addLog(`[Sub-Bot] Retrying in 7 seconds...`);
-                    setTimeout(() => requestPairing(retries - 1), 7000);
+                    addLog(`[Sub-Bot] Retrying in 5 seconds...`);
+                    setTimeout(() => requestPairing(retries - 1), 5000);
                 } else {
-                    await sock.sendMessage(from, { text: `❌ فشل طلب الكود بعد عدة محاولات. تأكد من أن الرقم صحيح وحاول مجدداً لاحقاً.` });
+                    await sock.sendMessage(from, { text: `❌ فشل طلب الكود. تأكد من أن الرقم غير مرتبط مسبقاً وحاول لاحقاً.` });
                 }
             }
         };
@@ -373,10 +378,14 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
             },
-            browser: Browsers.ubuntu('Chrome'),
+            browser: ["Ubuntu", "Chrome", "20.0.04"],
             markOnlineOnConnect: true,
             generateHighQualityLinkPreview: true,
             syncFullHistory: false,
+            // Add connection timeout
+            connectTimeoutMs: 90000,
+            defaultQueryTimeoutMs: 90000,
+            keepAliveIntervalMs: 30000,
             getMessage: async (key) => {
                 return { conversation: 'hello' };
             }
@@ -387,35 +396,54 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
 
         // Handle Pairing Code Request for Main Bot
         if (cleanNumber && !state.creds.registered) {
-            addLog(`[WhatsApp] Connecting to servers to request code for ${cleanNumber}...`);
+            addLog(`[WhatsApp] Preparing to request pairing code for ${cleanNumber}...`);
             
             const requestPairing = async (retries = 3) => {
                 try {
-                    if (!sock || botStatus === 'disconnected') return;
+                    if (!sock || botStatus === 'disconnected' || stopBotFlag) return;
                     
-                    addLog(`[WhatsApp] Requesting pairing code for number: ${cleanNumber}... (Attempt ${4 - retries}/3)`);
-                    pairingCode = await sock.requestPairingCode(cleanNumber);
+                    addLog(`[WhatsApp] Requesting official pairing code (Attempt ${4 - retries}/3)...`);
                     
-                    if (pairingCode) {
-                        addLog(`[WhatsApp] ✅ Pairing Code received: ${pairingCode}`);
+                    const code = await sock.requestPairingCode(cleanNumber);
+                    
+                    if (code) {
+                        pairingCode = code.toUpperCase();
+                        addLog(`[WhatsApp] ✅ Official Pairing Code generated: ${pairingCode}`);
                         io.emit('pairingCode', pairingCode);
+                        io.emit('log', `[System] Your official pairing code is: ${pairingCode}`);
                     }
                 } catch (err: any) {
-                    addLog(`[WhatsApp] ⚠️ Attempt failed: ${err.message}`);
-                    if (retries > 0) {
-                        addLog(`[WhatsApp] Retrying in 3 seconds...`);
-                        setTimeout(() => requestPairing(retries - 1), 3000);
+                    addLog(`[WhatsApp] ⚠️ Request failed: ${err.message}`);
+                    if (err.message.includes('rate-overlimit')) {
+                        addLog(`[WhatsApp] ⚠️ Rate limit exceeded. Please wait 24 hours.`);
+                        io.emit('log', `[Error] WhatsApp pairing rate limit exceeded (Retry later).`);
+                        return;
+                    }
+                    if (retries > 0 && !stopBotFlag) {
+                        const nextDelay = 7000;
+                        addLog(`[WhatsApp] Retrying pairing request in ${nextDelay/1000}s...`);
+                        setTimeout(() => requestPairing(retries - 1), nextDelay);
                     } else {
-                        addLog(`[WhatsApp] ❌ Failed to get code after all retries.`);
-                        botStatus = 'disconnected';
-                        io.emit('status', botStatus);
-                        io.emit('pairingCode', null);
+                        addLog(`[WhatsApp] ❌ Failed to get pairing code after retries.`);
+                        io.emit('log', `[Error] Failed to request pairing code. Check your number format.`);
                     }
                 }
             };
 
-            // Wait for socket to be ready
-            setTimeout(() => requestPairing(), 3000);
+            // Wait for socket to be ready and connected to WA servers
+            const initialDelay = 10000; 
+            addLog(`[WhatsApp] Establishing official connection for pairing...`);
+            io.emit('log', `[System] Requesting official Pairing Code for ${cleanNumber}. This usually takes 10-15 seconds...`);
+            
+            setTimeout(() => {
+                if (!stopBotFlag && botStatus !== 'disconnected' && !sock.authState.creds.registered) {
+                    requestPairing();
+                } else if (sock.authState.creds.registered) {
+                    addLog(`[WhatsApp] Skipping pairing request: device already registered.`);
+                } else {
+                    addLog(`[WhatsApp] Pairing request cancelled (bot stopped or disconnected).`);
+                }
+            }, initialDelay);
         } else if (cleanNumber && state.creds.registered) {
             addLog(`[WhatsApp] ⚠️ This device is already registered. Attempting to connect...`);
         }
@@ -434,6 +462,17 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
                 io.emit('status', botStatus);
                 addLog(`Connection closed. Error: ${error?.message || 'No error message'}. Status Code: ${statusCode || 'No status code'}. Reconnecting: ${shouldReconnect}`);
                 
+                if (statusCode === 401 || statusCode === DisconnectReason.loggedOut) {
+                    addLog('[System] Unauthorized (401) or Logged Out. Clearing session.');
+                    if (fs.existsSync(sessionFolder)) {
+                        fs.rmSync(sessionFolder, { recursive: true, force: true });
+                    }
+                    stopBotFlag = true;
+                    botStatus = 'disconnected';
+                    io.emit('status', botStatus);
+                    return;
+                }
+
                 if (shouldReconnect && !stopBotFlag) {
                     reconnectionCount++;
                     if (reconnectionCount > 5) {
@@ -1126,22 +1165,16 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
 
 // Vite middleware
 async function initServer() {
-    // Request logging for Socket.io debugging
-    app.use((req, res, next) => {
-        if (req.url.startsWith('/socket.io')) {
-            console.log(`[HTTP] Socket.io request: ${req.url} [${req.method}]`);
-        }
-        next();
-    });
-
     // Initialize Socket.io early with robust configuration
     io = new Server(server, {
         cors: {
             origin: "*",
             methods: ["GET", "POST"]
         },
-        pingTimeout: 60000,
+        pingTimeout: 120000,
         pingInterval: 25000,
+        connectTimeout: 45000,
+        allowEIO3: true,
         transports: ['websocket', 'polling']
     });
 
@@ -1219,6 +1252,9 @@ async function initServer() {
                 }
                 
                 stopBotFlag = false;
+                pairingCode = null;
+                socket.emit('pairingCode', null);
+                
                 addLog(`Starting bot for number: ${phoneNumber}`);
                 
                 const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
@@ -1230,6 +1266,7 @@ async function initServer() {
             } catch (err: any) {
                 console.error('Socket startBot Error:', err);
                 socket.emit('log', `[Error] Failed to start bot: ${err.message}`);
+                isStarting = false;
             }
         });
 
@@ -1239,6 +1276,9 @@ async function initServer() {
                     sock.end();
                 }
                 stopBotFlag = false;
+                pairingCode = null;
+                socket.emit('pairingCode', null);
+                
                 addLog(`Forcing new pairing for number: ${phoneNumber}`);
                 
                 const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
@@ -1250,6 +1290,7 @@ async function initServer() {
             } catch (err: any) {
                 console.error('Socket forcePairing Error:', err);
                 socket.emit('log', `[Error] Failed to force pairing: ${err.message}`);
+                isStarting = false;
             }
         });
 
