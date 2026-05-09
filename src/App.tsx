@@ -36,7 +36,11 @@ export default function App() {
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const socket = io();
+    const socket = io({
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      timeout: 20000,
+    });
     socketRef.current = socket;
 
     socket.on('connect', () => {

@@ -46,36 +46,9 @@ service cloud.firestore {
              && data.ownerNumber is string && data.ownerNumber.size() <= 20;
     }
 
-    // 1. Users Collection
-    match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn() && isValidUser(request.resource.data) && isValidId(userId);
-      allow delete: if isAdmin();
-    }
-
-    // 2. Groups Collection
-    match /groups/{groupId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn() && isValidGroup(request.resource.data) && isValidId(groupId);
-      allow delete: if isAdmin();
-    }
-
-    // 3. Settings Collection
-    match /settings/global {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isValidSetting(request.resource.data);
-    }
-
-    // 4. Logs Collection
-    match /logs/{logId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn();
-    }
-
-    // 5. Admins Collection
-    match /admins/{adminId} {
-      allow read: if isSignedIn();
-      allow write: if false;
+    // Phase 4: Match Blocks
+    match /{document=**} {
+      allow read, write: if isSignedIn();
     }
   }
 }

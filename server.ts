@@ -1126,14 +1126,35 @@ async function startBot(phoneNumber?: string, clearSession: boolean = false) {
 
 // Vite middleware
 async function initServer() {
-    // Initialize Socket.io early
-    io = new Server(server);
+    // Request logging for Socket.io debugging
+    app.use((req, res, next) => {
+        if (req.url.startsWith('/socket.io')) {
+            console.log(`[HTTP] Socket.io request: ${req.url} [${req.method}]`);
+        }
+        next();
+    });
 
-    // Initial non-Firestore log
-    console.log(`Initializing server in ${process.env.NODE_ENV || 'development'} mode`);
+    // Initialize Socket.io early with robust configuration
+    io = new Server(server, {
+        cors: {
+            origin: "*",
+            methods: ["GET", "POST"]
+        },
+        pingTimeout: 60000,
+        pingInterval: 25000,
+        transports: ['websocket', 'polling']
+    });
+
+    console.log(`[System] Initializing server in ${process.env.NODE_ENV || 'development'} mode`);
+    addLog('System initialization started...');
 
     // Ensure Auth happens
-    await ensureAuth();
+    ensureAuth()
+        .then(() => addLog('Firebase Auth: Ready'))
+        .catch(err => {
+            console.error('Initial Auth Error:', err);
+            addLog(`Firebase Auth Error: ${err.message}`);
+        });
 
     if (process.env.NODE_ENV !== 'production') {
         try {
@@ -1156,25 +1177,9 @@ async function initServer() {
         console.log(`Static middleware attached to ${distPath}`);
     }
 
-    // Start listening
-    server.listen(PORT, '0.0.0.0', async () => {
-        addLog(`Server running on http://localhost:${PORT}`);
-        
-        // Auto-start if a bot number is saved and its session exists
-        getSettings().then((settings: any) => {
-            const savedBotNumber = settings?.botNumber;
-            if (savedBotNumber) {
-                const sessionFolder = `session_${savedBotNumber}`;
-                if (fs.existsSync(path.join(sessionFolder, 'creds.json'))) {
-                    addLog(`[System] Found existing session for ${savedBotNumber}, auto-starting...`);
-                    startBot(savedBotNumber, false);
-                }
-            }
-        }).catch(err => console.error('Firebase Settings Error:', err));
-    });
-
-    // Socket.io events
+    // Socket.io events - MOVED BEFORE LISTEN
     io.on('connection', async (socket) => {
+        console.log('[Socket] New client connected:', socket.id);
         socket.emit('status', botStatus);
         socket.emit('pairingCode', pairingCode);
         
@@ -1274,6 +1279,27 @@ async function initServer() {
                 }
             }
         });
+
+        socket.on('disconnect', () => {
+            console.log('[Socket] Client disconnected:', socket.id);
+        });
+    });
+
+    // Start listening
+    server.listen(PORT, '0.0.0.0', async () => {
+        addLog(`Server running on http://localhost:${PORT}`);
+        
+        // Auto-start if a bot number is saved and its session exists
+        getSettings().then((settings: any) => {
+            const savedBotNumber = settings?.botNumber;
+            if (savedBotNumber) {
+                const sessionFolder = `session_${savedBotNumber}`;
+                if (fs.existsSync(path.join(sessionFolder, 'creds.json'))) {
+                    addLog(`[System] Found existing session for ${savedBotNumber}, auto-starting...`);
+                    startBot(savedBotNumber, false);
+                }
+            }
+        }).catch(err => console.error('Firebase Settings Error:', err));
     });
 }
 
