@@ -28,7 +28,7 @@ import {
     increment,
     writeBatch
 } from 'firebase/firestore';
-import { db as firestore, auth as firebaseAuth, OperationType, handleFirestoreError } from './src/lib/firebase.ts';
+import { db as firestore, auth as firebaseAuth, OperationType, handleFirestoreError, ensureAuth, isAuthReady } from './src/lib/firebase.ts';
 import pino from 'pino';
 import fs from 'fs';
 import sharp from 'sharp';
@@ -179,15 +179,21 @@ ${b[6]} | ${b[7]} | ${b[8]}
 async function addLog(message: string) {
     const log = `[${new Date().toLocaleTimeString()}] ${message}`;
     console.log(log);
-    try {
-        await setDoc(doc(firestore, 'logs', `${Date.now()}`), { 
-            message: log, 
-            timestamp: serverTimestamp() 
-        });
-    } catch (err) {
-        console.error('Firebase Log Error:', err);
-    }
+    
+    // Always emit to sockets if available
     if (io) io.emit('log', log);
+    
+    // Save to Firestore ONLY if authenticated
+    if (isAuthReady()) {
+        try {
+            await setDoc(doc(firestore, 'logs', `${Date.now()}`), { 
+                message: log, 
+                timestamp: serverTimestamp() 
+            });
+        } catch (err) {
+            // Silently fail for logs to avoid infinite recursion
+        }
+    }
 }
 
 async function sendUsage(from: string, msg: any, usage: string, description: string) {
@@ -1123,7 +1129,11 @@ async function initServer() {
     // Initialize Socket.io early
     io = new Server(server);
 
-    addLog(`Initializing server in ${process.env.NODE_ENV || 'development'} mode`);
+    // Initial non-Firestore log
+    console.log(`Initializing server in ${process.env.NODE_ENV || 'development'} mode`);
+
+    // Ensure Auth happens
+    await ensureAuth();
 
     if (process.env.NODE_ENV !== 'production') {
         try {
@@ -1139,39 +1149,28 @@ async function initServer() {
         }
     } else {
         const distPath = path.join(process.cwd(), 'dist');
-        if (fs.existsSync(distPath)) {
-            app.use(express.static(distPath));
-            app.get('*', (req, res) => {
-                res.sendFile(path.join(distPath, 'index.html'));
-            });
-            addLog('Static middleware attached');
-        } else {
-            addLog('Warning: dist folder not found in production mode');
-        }
+        app.use(express.static(distPath));
+        app.get('*', (req, res) => {
+            res.sendFile(path.join(distPath, 'index.html'));
+        });
+        console.log(`Static middleware attached to ${distPath}`);
     }
 
     // Start listening
     server.listen(PORT, '0.0.0.0', async () => {
         addLog(`Server running on http://localhost:${PORT}`);
         
-        // Sign in anonymously for Firestore access (Non-blocking)
-        signInAnonymously(firebaseAuth).then(() => {
-            console.log('Firebase: Signed in anonymously');
-            // Auto-start if a bot number is saved and its session exists
-            getSettings().then((settings: any) => {
-                const savedBotNumber = settings?.botNumber;
-                if (savedBotNumber) {
-                    const sessionFolder = `session_${savedBotNumber}`;
-                    if (fs.existsSync(path.join(sessionFolder, 'creds.json'))) {
-                        addLog(`[System] Found existing session for ${savedBotNumber}, auto-starting...`);
-                        startBot(savedBotNumber, false);
-                    }
+        // Auto-start if a bot number is saved and its session exists
+        getSettings().then((settings: any) => {
+            const savedBotNumber = settings?.botNumber;
+            if (savedBotNumber) {
+                const sessionFolder = `session_${savedBotNumber}`;
+                if (fs.existsSync(path.join(sessionFolder, 'creds.json'))) {
+                    addLog(`[System] Found existing session for ${savedBotNumber}, auto-starting...`);
+                    startBot(savedBotNumber, false);
                 }
-            }).catch(err => console.error('Firebase Settings Error:', err));
-        }).catch(error => {
-            console.error('Firebase Auth Error:', error);
-            addLog(`[Firebase] Auth Error: ${error.message}. Make sure Anonymous Auth is enabled in Firebase Console.`);
-        });
+            }
+        }).catch(err => console.error('Firebase Settings Error:', err));
     });
 
     // Socket.io events

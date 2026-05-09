@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { getAuth, signInAnonymously } from 'firebase/auth';
 import { 
     getFirestore, 
     doc, 
@@ -67,6 +67,23 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   }
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
+}
+
+let authIsReady = false;
+
+export async function ensureAuth() {
+    if (authIsReady) return;
+    try {
+        await signInAnonymously(auth);
+        authIsReady = true;
+        console.log('Firebase: Signed in anonymously');
+    } catch (error) {
+        console.error('Firebase Auth Error:', error);
+    }
+}
+
+export function isAuthReady() {
+    return authIsReady || !!auth.currentUser;
 }
 
 // Connection test

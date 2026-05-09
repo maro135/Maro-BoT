@@ -39,6 +39,21 @@ export default function App() {
     const socket = io();
     socketRef.current = socket;
 
+    socket.on('connect', () => {
+      console.log('Socket.io: Connected');
+      setStatus('connected');
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('Socket.io Connection Error:', err);
+      setStatus('disconnected');
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('Socket.io: Disconnected', reason);
+      setStatus('disconnected');
+    });
+
     socket.on('status', (s) => setStatus(s));
     socket.on('pairingCode', (c) => setPairingCode(c));
     socket.on('logs', (l) => setLogs(l));
